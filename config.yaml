@@ -3,11 +3,11 @@
 task_generation:
   min_tasks_per_subject: 50000         # Minimum tasks to accumulate before writing a Parquet file
   max_tasks_per_subject: 100000         # Maximum tasks per Parquet file (after which a new file is created)
-  batch_size: 200                       # Number of tasks to generate per batch
-  max_iterations: 2                     # Number of complete iterations over the text chunks
+  batch_size: 200                       # Number of tasks to generate per batch (not explicitly used in this version)
+  max_iterations: 1                     # Process each subject's chunks once
 
 bias_detection:
-  threshold: 0.1                        # Allowed overrepresentation ratio per domain (10% over the expected share)
+  threshold: 0.1                        # Allowed overrepresentation ratio per domain (10% over expected share)
   max_rebalancing_attempts: 5           # Maximum rebalancing attempts before aborting generation
   min_tasks_before_rebalancing: 5000    # Minimum tasks required before rebalancing checks
 
@@ -60,7 +60,7 @@ subject_extraction:
 
 model_config:
   model_name: "distilbert-base-uncased"  
-  summarizer_model: "facebook/bart-large-cnn"  # Model for generating summaries from text chunks
+  summarizer_model: "facebook/bart-large-cnn"  # Model for generating summaries
   inference_batch_size: 16
 
 storage:
