@@ -4,23 +4,21 @@ Training Data Preparation Script for Airflow DAG Ingestion
 
 This script will:
   • Print instructions on the expected data format.
-  • Prompt the user to specify a folder that contains documents (PDF, TXT, DOCX).
-  • Scan and extract text from each document and automatically parse out subjects.
-  • For each subject, generate “tasks” (each with fields: task_description, domain, recommended_execution).
-    – Tasks are generated until a minimum of 50,000 examples (up to 100,000) per subject.
-    – Tasks are generated in batches for performance.
-  • Monitor for bias in the training data. If any domain (task “class”) exceeds its expected share by >10%,
-    a rebalancing procedure is automatically triggered.
-    – If rebalancing happens more than 5 times before reaching 5000 tasks, the script will stop and ask for more data.
-  • Periodically check if the dataset for any subject exceeds 50GB on disk and print a message once it’s ready for LLM fine-tuning.
+  • Prompt the user to specify a folder containing documents (PDF, TXT, DOCX).
+  • Scan each document, extract its text, and determine its subject based on keyword matching.
+  • For each subject, generate “tasks” with fields: task_description, domain, recommended_execution.
+    – Tasks are generated in batches until between 50,000 and 100,000 examples per subject are reached.
+    – New tasks are appended to a permanent Parquet file for that subject.
+  • Monitor and automatically rebalance training data if any domain exceeds 10% dominance.
+    – If rebalancing occurs more than 5 times before reaching 5000 tasks, the script stops with a message.
+  • Periodically check if a subject’s dataset exceeds 50GB and print a message when it’s ready for LLM fine-tuning.
   • Use the distilbert-base-uncased model for fast inference.
-  • Support FP16 operations on CUDA-enabled GPUs (users may disable FP16 with a command-line flag) and automatically fall back to CPU.
-  • Output separate Parquet files (one per subject) ready to be ingested into an Airflow DAG.
-
+  • Support FP16 operations on CUDA-enabled GPUs (users may disable FP16 with a flag) with smooth CPU fallback.
+  
 Usage:
     python prepare_training_data.py [--no_fp16]
 
-Make sure you have installed the required packages:
+Ensure you have installed the required packages:
     pip install pandas pyarrow torch transformers PyPDF2 python-docx
 """
 
@@ -54,13 +52,13 @@ def print_instructions():
 
     Expected data:
       • A folder containing documents in PDF, TXT, or DOCX format.
-      • Each document should include subject markers (e.g., lines starting with "Subject:") 
-        to indicate the subject matter.
-      • The script will parse each document, extract subjects, and generate tasks with the format:
+      • Each document will be read in full and the subject will be determined based on keyword matching.
+      • The script will generate tasks with the format:
             "task_description", "domain", "recommended_execution"
       • Tasks will be generated in batches until between 50,000 and 100,000 examples per subject are reached.
+      • New tasks are appended to a permanent Parquet file for each subject.
       • The script includes automatic bias detection and rebalancing (if any domain exceeds its expected share by >10%).
-      • Dataset size is monitored, and once a subject’s dataset exceeds 50GB, a message will indicate it is ready for LLM fine-tuning.
+      • Dataset size is monitored, and once a subject’s dataset exceeds 50GB, a message indicates it is ready for LLM fine-tuning.
       
     Additional Options:
       • The script uses the distilbert-base-uncased model for fast inference.
@@ -111,24 +109,35 @@ def extract_text(file_path):
         return ""
 
 
-def parse_subjects(text):
+def determine_subject(text):
     """
-    Parse subjects from document text.
-    This demo looks for lines starting with 'Subject:'.
-    If none found, all text is assigned to a default 'General' subject.
+    Determine the subject of a document based on keyword counts.
+    Predefined subjects and their associated keywords:
+      - Finance: bank, finance, investment, market
+      - HR: human resource, employee, recruitment
+      - IT: software, IT, technology, computer
+      - Operations: operation, supply chain, logistics
+      - Sales: sales, revenue, customer, market
+
+    Returns the subject with the highest keyword count; if none match, returns 'General'.
     """
-    subjects = {}
-    current_subject = "General"
-    lines = text.splitlines()
-    for line in lines:
-        if line.startswith("Subject:"):
-            current_subject = line.replace("Subject:", "").strip()
-            if current_subject not in subjects:
-                subjects[current_subject] = ""
-        else:
-            subjects.setdefault(current_subject, "")
-            subjects[current_subject] += line + "\n"
-    return subjects
+    subjects_keywords = {
+         "Finance": ["bank", "finance", "investment", "market"],
+         "HR": ["human resource", "employee", "recruitment"],
+         "IT": ["software", "it", "technology", "computer"],
+         "Operations": ["operation", "supply chain", "logistics"],
+         "Sales": ["sales", "revenue", "customer", "market"]
+    }
+    counts = {}
+    text_lower = text.lower()
+    for subject, keywords in subjects_keywords.items():
+         # Sum the occurrence of each keyword
+         count = sum(text_lower.count(keyword) for keyword in keywords)
+         counts[subject] = count
+    subject_chosen = max(counts, key=counts.get)
+    if counts[subject_chosen] == 0:
+         return "General"
+    return subject_chosen
 
 
 def generate_tasks_for_subject(subject, content, model, tokenizer, device, batch_size=100):
@@ -142,7 +151,6 @@ def generate_tasks_for_subject(subject, content, model, tokenizer, device, batch
     tasks = []
     rebalancing_count = 0
     domain_distribution = {}  # Counts per domain
-    # For simulation, assume these candidate domains (could be derived from content in a real use-case)
     candidate_domains = ["Finance", "HR", "IT", "Operations", "Sales"]
 
     # Split the content into paragraphs as a simple way to get text chunks.
@@ -158,11 +166,8 @@ def generate_tasks_for_subject(subject, content, model, tokenizer, device, batch
         batch_tasks = []
         # Process a batch of tasks
         for _ in range(batch_size):
-            # Randomly select a paragraph (simulate batch processing)
             paragraph = random.choice(paragraphs)
-            # In a real scenario, you might run the model over the paragraph to generate a task description.
             task_description = f"Review content snippet: {paragraph[:50]}..."
-            # For demo, randomly assign a domain from our candidate list.
             domain = random.choice(candidate_domains)
             recommended_execution = "automated analysis" if len(paragraph) > 100 else "manual review"
             task = {
@@ -176,16 +181,11 @@ def generate_tasks_for_subject(subject, content, model, tokenizer, device, batch
         total_tasks = len(tasks)
 
         # --- Bias Detection and Correction ---
-        # Here we check if any domain’s count is too high relative to the expected equal share.
         expected_share = total_tasks / len(candidate_domains)
-        bias_detected = False
         for d, count in domain_distribution.items():
-            # If a domain exceeds expected share by >10% of total tasks, consider it biased.
             if count > expected_share + 0.1 * total_tasks:
-                bias_detected = True
-                # Rebalance: downsample tasks from this domain to the allowed limit.
+                # Rebalance: downsample tasks from the dominant domain.
                 allowed = int(expected_share + 0.1 * total_tasks)
-                # Filter tasks to remove extra occurrences of the dominant domain.
                 new_tasks = []
                 current_count = 0
                 for t in tasks:
@@ -199,13 +199,13 @@ def generate_tasks_for_subject(subject, content, model, tokenizer, device, batch
                 domain_distribution[d] = allowed
                 rebalancing_count += 1
                 print(f"Bias detected in domain '{d}'. Rebalancing... (Rebalance count: {rebalancing_count})")
-                break  # re-check in the next batch
+                break  # Re-check in the next batch
 
         if rebalancing_count > 5 and total_tasks < 5000:
             print("Rebalancing occurred more than 5 times before 5000 tasks were generated. Please provide more data.")
             sys.exit(1)
 
-        # (Optional: break early if we exceed the target_max)
+        # If we exceed the target_max, trim the tasks.
         if total_tasks >= target_max:
             tasks = tasks[:target_max]
             break
@@ -213,18 +213,36 @@ def generate_tasks_for_subject(subject, content, model, tokenizer, device, batch
     return tasks
 
 
-def check_dataset_size(subject, tasks, output_folder):
+def check_dataset_size(file_path):
     """
-    Write current tasks to a temporary Parquet file and check its file size.
-    If the file size exceeds 50GB, return the size in GB.
+    Check the file size of the given Parquet file in GB.
     """
-    df = pd.DataFrame(tasks)
-    temp_path = os.path.join(output_folder, f"{subject}_temp.parquet")
-    df.to_parquet(temp_path, index=False)
-    size_bytes = os.path.getsize(temp_path)
+    if not os.path.exists(file_path):
+        return 0
+    size_bytes = os.path.getsize(file_path)
     size_gb = size_bytes / (1024**3)
-    os.remove(temp_path)
     return size_gb
+
+
+def append_tasks_to_parquet(subject, new_tasks, output_folder):
+    """
+    Append new tasks to a permanent Parquet file for a given subject.
+    If the file already exists, load it, append the new tasks, and overwrite the file.
+    """
+    df_new = pd.DataFrame(new_tasks)
+    output_path = os.path.join(output_folder, f"{subject}.parquet")
+    if os.path.exists(output_path):
+        try:
+            df_existing = pd.read_parquet(output_path)
+            df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+        except Exception as e:
+            print(f"Error reading existing Parquet file for subject '{subject}': {e}")
+            df_combined = df_new
+    else:
+        df_combined = df_new
+
+    df_combined.to_parquet(output_path, index=False)
+    return output_path, df_combined
 
 
 def main():
@@ -247,17 +265,18 @@ def main():
         print("No supported document files found in the folder.")
         sys.exit(1)
 
-    # Extract text from each file and parse subjects.
+    # Process each file: extract text and determine the subject based on keywords.
     subjects_dict = {}
     for file in file_paths:
         print(f"Processing file: {file}")
         text = extract_text(file)
-        subj_texts = parse_subjects(text)
-        for subj, content in subj_texts.items():
-            if subj in subjects_dict:
-                subjects_dict[subj] += "\n" + content
-            else:
-                subjects_dict[subj] = content
+        if not text.strip():
+            continue
+        subject = determine_subject(text)
+        if subject in subjects_dict:
+            subjects_dict[subject] += "\n" + text
+        else:
+            subjects_dict[subject] = text
 
     # Process command-line arguments for FP16 usage.
     parser = argparse.ArgumentParser(description="Training Data Preparation Script")
@@ -276,23 +295,20 @@ def main():
     else:
         model = AutoModel.from_pretrained(model_name).to(device)
 
-    # For each subject, generate tasks and create a Parquet file.
+    # For each subject, generate tasks, append them to the permanent Parquet file,
+    # and check the file size.
     for subject, content in subjects_dict.items():
         print(f"\nGenerating tasks for subject: {subject}")
-        tasks = generate_tasks_for_subject(subject, content, model, tokenizer, device)
+        new_tasks = generate_tasks_for_subject(subject, content, model, tokenizer, device)
 
-        # Periodically check if the dataset for this subject exceeds 50GB.
-        size_gb = check_dataset_size(subject, tasks, output_folder)
+        output_path, df_combined = append_tasks_to_parquet(subject, new_tasks, output_folder)
+        size_gb = check_dataset_size(output_path)
         if size_gb > 50:
             print(f"Dataset for subject '{subject}' exceeds 50GB. It is now ready for LLM fine-tuning.")
         else:
             print(f"Current dataset size for subject '{subject}': {size_gb:.2f} GB.")
 
-        # Save the tasks to a Parquet file.
-        df = pd.DataFrame(tasks)
-        output_path = os.path.join(output_folder, f"{subject}.parquet")
-        df.to_parquet(output_path, index=False)
-        print(f"Parquet file saved for subject '{subject}' at: {output_path}")
+        print(f"Permanent Parquet file for subject '{subject}' saved at: {output_path}")
 
 
 if __name__ == "__main__":
