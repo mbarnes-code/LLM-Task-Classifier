@@ -1,53 +1,66 @@
 # production_config.yaml
 
 task_generation:
-  min_tasks_per_subject: 50000         # Minimum tasks to accumulate before writing a Parquet file
-  max_tasks_per_subject: 100000         # Maximum tasks per Parquet file (after which a new file is created)
-  batch_size: 200                       # Number of tasks to generate per batch (not explicitly used in this version)
-  max_iterations: 1                     # Process each subject's chunks once
+  min_tasks_per_subject: 50000         # Minimum tasks to accumulate before flushing to a new file
+  max_tasks_per_subject: 100000         # Maximum tasks per Parquet file; flush when reached
+  batch_size: 200                       # Number of tasks generated per batch
+  quality_threshold: 0.5                # Discard tasks scoring below this threshold (range 0 to 1)
 
 bias_detection:
   threshold: 0.1                        # Allowed overrepresentation ratio per domain (10% over expected share)
-  max_rebalancing_attempts: 5           # Maximum rebalancing attempts before aborting generation
-  min_tasks_before_rebalancing: 5000    # Minimum tasks required before rebalancing checks
+  max_rebalancing_attempts: 5           # Maximum number of rebalancing attempts before early exit
+  min_tasks_before_rebalancing: 5000    # Minimum tasks needed before bias checks are enforced
+  user_confirmation: false              # No interactive confirmations in production
 
-dataset_monitoring:
-  size_limit_gb: 50                     # (Optional) Notify if dataset file exceeds this size
+summarization:
+  enabled: true                         # Enable summarization for long text chunks
+  model_name: "facebook/bart-large-cnn" # Summarization model for context reduction
+  max_length: 130                       # Maximum summary length
+  min_length: 30                        # Minimum summary length
 
 device_config:
-  device: "auto"                        # Options: "auto", "cpu", or "cuda"
-  enable_fp16: true                     # Enable FP16 if GPU supports it
+  device: "auto"                        # Auto-select device ("auto", "cpu", or "cuda")
+  enable_fp16: true                     # Use FP16 on supported GPUs
 
 logging:
-  level: "INFO"                         
-  log_file: "/var/log/task_generation.log"  
-  enable_console: false                 
-  rotate: true                          
-  max_file_size: "100MB"                
-  backup_count: 5                       
+  level: "INFO"                         # Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+  log_file: "/var/log/task_generation.log"  # File path for log output
+  enable_console: false                 # Disable console logging for production
+  rotate: true                          # Enable log rotation
+  max_file_size: "100MB"                # Maximum log file size before rotation
+  backup_count: 5                       # Number of rotated log files to retain
 
 parallel_processing:
-  enabled: true
-  num_workers: 8                        # Number of parallel workers for file processing
+  enabled: true                         # Enable concurrent processing of files
+  num_workers: 8                        # Number of worker threads for parallel processing
+  resource_limits:
+    max_memory_mb: 8192                 # Exit if memory usage exceeds 8GB
+    max_cpu_percent: 85                 # Exit if CPU usage exceeds 85%
+
+storage:
+  input_folder: "/data/documents"       # Folder path where input documents reside
+  output_folder: "/data/parquet_output" # Folder path for saving generated Parquet files
 
 subject_extraction:
   keywords:
-    General:
-      - "general"
+    Regulatory:
+      - "regulation"
+      - "compliance"
+      - "policy"
+      - "faa"
+    Security:
+      - "attack"
+      - "risk"
+      - "vulnerability"
+      - "threat"
     Finance:
-      - "bank"
       - "finance"
       - "investment"
-      - "market"
-    HR:
-      - "human resource"
-      - "employee"
-      - "recruitment"
+      - "bank"
     IT:
       - "software"
-      - "it"
       - "technology"
-      - "computer"
+      - "it"
     Operations:
       - "operation"
       - "supply chain"
@@ -56,24 +69,5 @@ subject_extraction:
       - "sales"
       - "revenue"
       - "customer"
-      - "market"
-
-model_config:
-  model_name: "distilbert-base-uncased"  
-  summarizer_model: "facebook/bart-large-cnn"  # Model for generating summaries
-  inference_batch_size: 16
-
-storage:
-  input_folder: "/data/documents"        # Path where input documents are stored
-  output_folder: "/data/parquet_output"    # Path to save generated Parquet files
-
-airflow:
-  dag_name: "training_data_ingestion"
-  schedule_interval: "0 2 * * *"           # Example: Daily at 2 AM
-
-alerts:
-  enable_email_alerts: true
-  email_recipients:
-    - "ops@example.com"
-    - "admin@example.com"
-  alert_threshold: 0.05
+    General:
+      - "general"
