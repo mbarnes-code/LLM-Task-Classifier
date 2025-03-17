@@ -4,13 +4,13 @@ Production Training Data Preparation Script for Airflow DAG Ingestion
 
 This script loads its configuration from a YAML file (e.g., "production_config.yaml")
 and performs the following:
-  - Processes documents from the input folder using concurrent file processing with a status bar.
+  - Processes documents from the input folder using concurrent file processing with status bars.
   - Cleans and chunks text intelligently.
   - Summarizes each chunk using a transformer summarization model.
   - Automatically generates tasks based on the summary.
-  - Once a file’s worth of tasks (at least min_tasks, up to max_tasks) is generated,
-    it writes the tasks to a new Parquet file (e.g., subject_1.parquet, subject_2.parquet, etc.).
-  - Continues generating tasks for each subject until all text chunks have been processed.
+  - Once the accumulated tasks for a subject reach the maximum threshold,
+    writes the tasks to a new Parquet file (e.g., subject_1.parquet, subject_2.parquet, etc.).
+  - After processing all chunks for a subject, flushes any remaining tasks.
   - Logs progress and errors as configured.
 
 Usage:
@@ -100,8 +100,9 @@ def print_instructions():
     Production Training Data Preparation Script for Airflow DAG Ingestion.
     The script processes documents from the input folder, extracts text,
     cleans and chunks it, summarizes each chunk, and generates tasks.
-    Each file of tasks (between min_tasks and max_tasks tasks) is written as a new Parquet file.
-    Progress is shown via status bars.
+    Each subject's tasks are incrementally saved to new Parquet files when the
+    accumulated tasks reach the maximum threshold.
+    Status bars show progress throughout the process.
     """
     print(instructions)
     logging.info("Instructions printed.")
@@ -183,7 +184,6 @@ def initialize_summarizer(config):
 
 def summarize_chunk(text_chunk, summarizer, max_length=130, min_length=30):
     try:
-        # Truncate long text chunks to avoid model errors.
         if len(text_chunk.split()) > 512:
             text_chunk = " ".join(text_chunk.split()[:512])
         summary = summarizer(text_chunk, max_length=max_length, min_length=min_length, do_sample=False)
@@ -205,54 +205,48 @@ def filter_duplicate_tasks(tasks):
 def generate_and_store_tasks_for_subject(subject, content, config, summarizer, output_folder):
     """
     Generate tasks from a subject's content by processing its text chunks.
-    Instead of stopping when a minimum threshold is reached, this function writes out a new Parquet file
-    each time the accumulated tasks reach between min_tasks and max_tasks.
-    The process continues until all chunks have been processed.
+    Tasks are accumulated and, once they reach the max_tasks threshold,
+    are flushed to a new Parquet file. This process continues until all chunks are processed.
     """
     min_tasks = config["task_generation"].get("min_tasks_per_subject", 50000)
     max_tasks = config["task_generation"].get("max_tasks_per_subject", 100000)
-    max_iterations = config["task_generation"].get("max_iterations", 1)
     candidate_domains = list(config.get("subject_extraction", {}).get("keywords", {}).keys())
     
-    # Clean and chunk the content.
     chunks = clean_and_chunk_text(content)
     logging.info(f"Subject '{subject}' has {len(chunks)} text chunks.")
     
     file_count = 1
-    # For status reporting: total chunks processed.
+    current_tasks = []
     processed_chunks = 0
     
-    for iteration in range(max_iterations):
-        current_tasks = []
-        # Use a progress bar for chunk processing.
-        for chunk in tqdm(chunks, desc=f"[{subject}] Iteration {iteration+1} processing chunks", leave=False):
-            processed_chunks += 1
-            summary = summarize_chunk(chunk, summarizer)
-            task_description = f"Analyze the following summary: '{summary}'"
-            domain = random.choice(candidate_domains)
-            recommended_execution = "automated analysis" if len(chunk) > 100 else "manual review"
-            current_tasks.append({
-                "task_description": task_description,
-                "domain": domain,
-                "recommended_execution": recommended_execution,
-            })
-            # If we've reached the max_tasks threshold, flush current_tasks to a new file.
-            if len(current_tasks) >= max_tasks:
-                current_tasks = filter_duplicate_tasks(current_tasks)
-                filename = os.path.join(output_folder, f"{subject}_{file_count}.parquet")
-                pd.DataFrame(current_tasks).to_parquet(filename, index=False)
-                logging.info(f"Saved {len(current_tasks)} tasks to {filename}")
-                file_count += 1
-                current_tasks = []
-        # After processing all chunks in this iteration, if current_tasks are non-empty and above a minimal threshold:
-        if current_tasks:
-            if len(current_tasks) < min_tasks:
-                logging.info(f"Iteration {iteration+1} for subject '{subject}' produced only {len(current_tasks)} tasks; flushing remaining tasks.")
+    for chunk in tqdm(chunks, desc=f"[{subject}] Processing chunks", leave=False):
+        processed_chunks += 1
+        summary = summarize_chunk(chunk, summarizer)
+        task_description = f"Analyze the following summary: '{summary}'"
+        domain = random.choice(candidate_domains)
+        recommended_execution = "automated analysis" if len(chunk) > 100 else "manual review"
+        current_tasks.append({
+            "task_description": task_description,
+            "domain": domain,
+            "recommended_execution": recommended_execution,
+        })
+        if len(current_tasks) >= max_tasks:
             current_tasks = filter_duplicate_tasks(current_tasks)
             filename = os.path.join(output_folder, f"{subject}_{file_count}.parquet")
             pd.DataFrame(current_tasks).to_parquet(filename, index=False)
             logging.info(f"Saved {len(current_tasks)} tasks to {filename}")
             file_count += 1
+            current_tasks = []
+    
+    if current_tasks:
+        if len(current_tasks) < min_tasks:
+            logging.info(f"Subject '{subject}' produced only {len(current_tasks)} tasks in final file; flushing remaining tasks.")
+        current_tasks = filter_duplicate_tasks(current_tasks)
+        filename = os.path.join(output_folder, f"{subject}_{file_count}.parquet")
+        pd.DataFrame(current_tasks).to_parquet(filename, index=False)
+        logging.info(f"Saved {len(current_tasks)} tasks to {filename}")
+        file_count += 1
+    
     logging.info(f"Finished generating tasks for subject '{subject}'. Total chunks processed: {processed_chunks}")
 
 #########################################
@@ -264,7 +258,6 @@ def process_file(file, subject_keywords):
     text = extract_text(file)
     if not text.strip():
         return None
-    # Simple keyword matching to determine subject.
     text_lower = text.lower()
     counts = {}
     for subject, keywords in subject_keywords.items():
@@ -285,24 +278,20 @@ def main():
     parser.add_argument("--no_fp16", action="store_true", help="Disable FP16 training")
     args = parser.parse_args()
 
-    # Load configuration and setup logging.
     config = load_config(args.config)
     setup_logging(config.get("logging", {}))
     logging.info("Configuration loaded and logging set up.")
 
     print_instructions()
 
-    # Get input folder from config or prompt user.
     input_folder = get_input_folder(config)
     if not os.path.isdir(input_folder):
         logging.error("The provided folder path is not valid.")
         sys.exit(1)
 
-    # Create output folder from configuration.
     output_folder = config.get("storage", {}).get("output_folder", os.path.join(input_folder, "parquet_output"))
     os.makedirs(output_folder, exist_ok=True)
 
-    # Find supported document files.
     file_extensions = ("*.txt", "*.pdf", "*.docx")
     file_paths = []
     for ext in file_extensions:
@@ -311,7 +300,6 @@ def main():
         logging.error("No supported document files found in the folder.")
         sys.exit(1)
 
-    # Process files in parallel to extract text and determine subject.
     subject_keywords = config.get("subject_extraction", {}).get("keywords", {})
     subjects_dict = {}
     with ThreadPoolExecutor(max_workers=config.get("parallel_processing", {}).get("num_workers", 4)) as executor:
@@ -324,7 +312,6 @@ def main():
             subjects_dict.setdefault(subject, "")
             subjects_dict[subject] += "\n" + text
 
-    # Configure device and FP16 usage.
     device_config = config.get("device_config", {})
     if device_config.get("device", "auto") == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -333,7 +320,6 @@ def main():
     use_fp16 = (device.type == "cuda" and device_config.get("enable_fp16", True) and not args.no_fp16)
     logging.info(f"Using device: {device}. FP16 enabled: {use_fp16}")
 
-    # Load model and tokenizer.
     model_name = config.get("model_config", {}).get("model_name", "distilbert-base-uncased")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if use_fp16:
@@ -341,10 +327,8 @@ def main():
     else:
         model = AutoModel.from_pretrained(model_name).to(device)
 
-    # Initialize summarizer.
     summarizer = initialize_summarizer(config)
 
-    # For each subject, generate and store tasks in separate Parquet files.
     for subject, content in subjects_dict.items():
         logging.info(f"Generating tasks for subject: {subject}")
         generate_and_store_tasks_for_subject(subject, content, config, summarizer, output_folder)
