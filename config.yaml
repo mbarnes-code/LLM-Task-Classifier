@@ -1,0 +1,89 @@
+# production_config.yaml
+
+# Task Generation Settings
+task_generation:
+  min_tasks_per_subject: 50000
+  max_tasks_per_subject: 100000
+  batch_size: 200  # Increased batch size for production throughput
+
+# Bias Detection Settings
+bias_detection:
+  threshold: 0.1                # Allowed overrepresentation ratio per domain
+  max_rebalancing_attempts: 5   # Maximum number of rebalancing attempts before halting
+  min_tasks_before_rebalancing: 5000  # Minimum tasks generated before checking for bias
+
+# Dataset Monitoring
+dataset_monitoring:
+  size_limit_gb: 50  # Notify when a subject’s dataset exceeds 50GB
+
+# Device Configuration
+device_config:
+  device: "auto"      # Options: "auto", "cpu", "cuda"
+  enable_fp16: true   # Use half-precision if supported by GPU; set false if legacy hardware
+
+# Logging Configuration
+logging:
+  level: "INFO"                           # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  log_file: "/var/log/task_generation.log"  # Production log file location
+  enable_console: false                   # Disable console logging in production
+  rotate: true                            # Enable log rotation
+  max_file_size: "100MB"                  # Maximum log file size before rotation
+  backup_count: 5                         # Number of backup log files to retain
+
+# Parallel Processing Configuration
+parallel_processing:
+  enabled: true
+  num_workers: 8   # Increase workers for faster processing in production environments
+
+# Subject Extraction Keywords (Domain-Agnostic Base Keywords)
+subject_extraction:
+  keywords:
+    General:
+      - "general"
+    Finance:
+      - "bank"
+      - "finance"
+      - "investment"
+      - "market"
+    HR:
+      - "human resource"
+      - "employee"
+      - "recruitment"
+    IT:
+      - "software"
+      - "it"
+      - "technology"
+      - "computer"
+    Operations:
+      - "operation"
+      - "supply chain"
+      - "logistics"
+    Sales:
+      - "sales"
+      - "revenue"
+      - "customer"
+      - "market"
+
+# Model Configuration
+model_config:
+  model_name: "distilbert-base-uncased"
+  use_cache: true
+  inference_batch_size: 16
+
+# File Paths and Storage Settings
+storage:
+  input_folder: "/data/documents"
+  output_folder: "/data/parquet_output"
+
+# Airflow DAG Configuration (if integrating with Airflow)
+airflow:
+  dag_name: "training_data_ingestion"
+  schedule_interval: "0 2 * * *"  # Schedule: Daily at 2 AM
+
+# Alert and Monitoring Configuration (Optional)
+alerts:
+  enable_email_alerts: true
+  email_recipients:
+    - "ops@example.com"
+    - "admin@example.com"
+  alert_threshold: 0.05  # For example, trigger alerts if rebalancing frequency exceeds this threshold
