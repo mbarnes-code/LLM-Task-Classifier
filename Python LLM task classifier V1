@@ -1,0 +1,85 @@
+import pandas as pd
+import torch
+from transformers import BertTokenizer, BertForSequenceClassification
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+# Load dataset with expanded labeled tasks
+data = [
+    ("Analyze SIEM alerts and generate a summary report", "Cybersecurity", "LLM Processing"),
+    ("Parse firewall logs for suspicious activity", "Cybersecurity", "Scheduled Script"),
+    ("Check a file hash against a list of known malicious hashes", "Cybersecurity", "Script"),
+    ("Detect anomalies in network traffic", "Cybersecurity", "LLM Processing"),
+    ("Generate an optimized Python function for data encryption", "Programming", "LLM Processing"),
+    ("Run scheduled unit tests for a software project", "Programming", "Script"),
+    ("Debug performance bottlenecks in a web application", "Programming", "LLM Processing"),
+    ("Analyze patient symptoms and suggest potential diagnoses", "Healthcare", "LLM Processing"),
+    ("Check patient's blood pressure and record the result", "Healthcare", "Manual or Device-Based"),
+    ("Predict stock price trends based on historical market data", "Finance", "LLM Processing or ML Model"),
+    ("Generate a monthly budget report based on transaction history", "Finance", "Script or Spreadsheet Automation"),
+    ("Summarize a legal contract and extract key obligations", "General", "LLM Processing"),
+    ("Analyze customer feedback sentiment from online reviews", "General", "LLM Processing")
+]
+
+df = pd.DataFrame(data, columns=["task_description", "domain", "recommended_execution"])
+
+# Load pre-trained BERT model and tokenizer
+tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=3)
+
+# Tokenization
+X = tokenizer(list(df["task_description"]), padding=True, truncation=True, return_tensors="pt")
+y = df["recommended_execution"].astype('category').cat.codes
+
+# Train-test split
+X_train, X_test, y_train, y_test = train_test_split(X['input_ids'], y, test_size=0.2, random_state=42, stratify=y)
+
+# Training loop
+def train_model():
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
+    model.train()
+    for epoch in range(3):
+        optimizer.zero_grad()
+        outputs = model(X_train, labels=y_train)
+        loss = outputs.loss
+        loss.backward()
+        optimizer.step()
+    print("Model Training Completed")
+
+train_model()
+
+# Evaluate Model
+model.eval()
+y_pred = model(X_test).logits.argmax(dim=1)
+accuracy = accuracy_score(y_test, y_pred)
+print(f"Model Accuracy: {accuracy * 100:.2f}%")
+
+# FastAPI Application
+app = FastAPI()
+
+class TaskRequest(BaseModel):
+    task_description: str
+
+@app.post("/classify")
+def classify_task(task: TaskRequest):
+    if not isinstance(task.task_description, str) or not task.task_description.strip():
+        raise HTTPException(status_code=400, detail="Task description must be a non-empty string.")
+    
+    tokens = tokenizer(task.task_description, return_tensors="pt", padding=True, truncation=True)
+    with torch.no_grad():
+        prediction = model(tokens['input_ids']).logits.argmax().item()
+    
+    execution_methods = df["recommended_execution"].astype('category').cat.categories
+    return {"recommended_execution": execution_methods[prediction]}
+
+# Monitoring dataset size for LLM fine-tuning
+def check_dataset_size():
+    dataset_size_gb = df.memory_usage(deep=True).sum() / (1024 ** 3)
+    if dataset_size_gb >= 50:
+        print("Dataset has reached 50GB, ready for LLM fine-tuning.")
+    else:
+        print(f"Dataset size: {dataset_size_gb:.2f}GB. Fine-tuning threshold not met.")
+
+check_dataset_size()
