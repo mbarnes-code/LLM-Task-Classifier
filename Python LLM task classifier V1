@@ -20,30 +20,58 @@ import argparse
 import random
 import sys
 import logging
-import yaml
+import subprocess
+import importlib
+
+# Function to install missing packages
+def install_package(package_name):
+    print(f"Attempting to install {package_name}...")
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+        print(f"Successfully installed {package_name}")
+        return True
+    except subprocess.CalledProcessError:
+        print(f"Failed to install {package_name}. Please install it manually.")
+        return False
+
+# Dictionary mapping module names to their pip package names
+package_map = {
+    "yaml": "PyYAML",
+    "pandas": "pandas",
+    "torch": "torch",
+    "transformers": "transformers",
+    "PyPDF2": "PyPDF2",
+    "docx": "python-docx",
+    "tqdm": "tqdm",
+    "psutil": "psutil",
+}
+
+# Try importing each package, install if missing
+for module_name, package_name in package_map.items():
+    try:
+        globals()[module_name] = importlib.import_module(module_name)
+    except ImportError:
+        print(f"{module_name} not found. Installing {package_name}...")
+        if install_package(package_name):
+            try:
+                globals()[module_name] = importlib.import_module(module_name)
+                print(f"Successfully imported {module_name} after installation")
+            except ImportError:
+                print(f"Failed to import {module_name} even after installing {package_name}. Exiting.")
+                sys.exit(1)
+        else:
+            print(f"Could not install {package_name}. Exiting.")
+            sys.exit(1)
+
+# Now that we have all imports, import specific items from modules
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-import pandas as pd
-import torch
 from transformers import AutoTokenizer, AutoModel, pipeline
 
-# Optional imports for file reading:
-try:
-    import PyPDF2
-except ImportError:
-    print("Please install PyPDF2 for PDF support (pip install PyPDF2)")
-    sys.exit(1)
-
-try:
-    import docx
-except ImportError:
-    print("Please install python-docx for DOCX support (pip install python-docx)")
-    sys.exit(1)
-
-try:
+# Define tqdm fallback if still not available
+if 'tqdm' in globals():
     from tqdm import tqdm
-except ImportError:
+else:
     tqdm = lambda x, **kwargs: x  # Fallback if tqdm is not installed
 
 import psutil  # for resource safeguard checks
@@ -282,18 +310,27 @@ def generate_tasks_for_subject(subject, content, config, domain_keywords):
         for d, count in domain_distribution.items():
             if count > expected_share * (1 + bias_threshold):
                 allowed = int(expected_share * (1 + bias_threshold))
-                # filter tasks to remove extra occurrences
-                new_tasks = []
+                # filter tasks to remove extra occurrences6
+                rebalanced_tasks = []
                 current_count = 0
                 for t in tasks:
                     if t["domain"] == d:
                         if current_count < allowed:
-                            new_tasks.append(t)
+                            rebalanced_tasks.append(t)
                             current_count += 1
                     else:
-                        new_tasks.append(t)
-                tasks = new_tasks
-                domain_distribution[d] = allowed
+                        rebalanced_tasks.append(t)
+                        
+                # Replace the tasks list with the rebalanced list
+                tasks = rebalanced_tasks
+                total_tasks = len(tasks)
+                
+                # Recalculate the entire domain distribution after rebalancing
+                domain_distribution = {}
+                for task in tasks:
+                    domain = task["domain"]
+                    domain_distribution[domain] = domain_distribution.get(domain, 0) + 1
+                
                 rebalancing_count += 1
                 logging.info(f"Bias detected in domain '{d}'. Rebalancing... (Attempt: {rebalancing_count})")
                 break
